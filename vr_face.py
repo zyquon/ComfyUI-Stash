@@ -206,6 +206,8 @@ class VRFaceUnrectify:
             frame = frames[e['frame_idx']]
             eye = e['eye']
             eye_w, eye_h = e['eye_w'], e['eye_h']
+            # eye_img is a VIEW into frame for every layout, so compositing into it
+            # in place updates the frame directly -- no full-eye write-back needed.
             if eye == 'M':
                 eye_img = frame
             elif eye in ('L', 'R'):
@@ -218,24 +220,20 @@ class VRFaceUnrectify:
             alpha = np.full(swapped.shape[:2] + (1,), 255, dtype=np.uint8)
             rgba = np.concatenate([swapped, alpha], axis=2)
 
+            # Windowed un-rectify: reproject only the eye sub-region the patch
+            # covers, so cost tracks the face footprint, not the frame resolution.
             if e['projection'] == 'fisheye':
-                proj = vr.fisheye_p2e(rgba, e['patch_fov'], e['yaw'], e['pitch'],
-                                      eye_w, e['eye_h'], e['fisheye_fov'],
-                                      e['cx'], e['cy'], e['radius'])
+                win, x0, y0 = vr.fisheye_p2e_window(
+                    rgba, e['patch_fov'], e['yaw'], e['pitch'], eye_w, e['eye_h'],
+                    e['fisheye_fov'], e['cx'], e['cy'], e['radius'])
             else:
-                proj = vr.p2e(rgba, e['patch_fov'], e['yaw'], e['pitch'], eye_w, e['eye_h'])
+                win, x0, y0 = vr.p2e_window(
+                    rgba, e['patch_fov'], e['yaw'], e['pitch'], eye_w, e['eye_h'])
 
-            composited = vr.alpha_over(eye_img, proj)
-            if eye == 'M':
-                frames[e['frame_idx']] = composited
-            elif eye == 'L':
-                frame[:, :eye_w] = composited
-            elif eye == 'R':
-                frame[:, eye_w:] = composited
-            elif eye == 'T':
-                frame[:eye_h] = composited
-            else:  # 'B'
-                frame[eye_h:] = composited
+            if win is None:  # patch projects nowhere in the eye -> nothing to do
+                continue
+            y1, x1 = y0 + win.shape[0], x0 + win.shape[1]
+            eye_img[y0:y1, x0:x1] = vr.alpha_over(eye_img[y0:y1, x0:x1], win)
 
         print(f'VR Face Unrectify: composited patches: {len(entries)}')
         out = torch.cat([_np_to_img(f) for f in frames], dim=0)
