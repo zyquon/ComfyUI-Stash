@@ -34,10 +34,12 @@ pre-commit install
 
 ### Testing
 ```bash
-# Tests live at the repo root, not in a tests/ dir
-pytest test_vr_face.py
+# Tests and dev scripts live under tests/ (matches pyproject testpaths)
+python3 tests/test_vr_face.py
 ```
-Note: `pyproject.toml` sets `testpaths = ["tests"]`, but there is no `tests/` directory — a bare `pytest` collects nothing. Run the file explicitly.
+Each file under `tests/` puts the package root on `sys.path` itself, so run it
+directly from the repo root. `tests/bench_vr_remap.py` times rectify vs un-rectify
+across resolutions (see its module docstring).
 
 The VR nodes import `cv2` (opencv) and `insightface`, which are **not in `requirements.txt`** (only pillow/numpy/requests). Install them separately to run the VR face nodes.
 

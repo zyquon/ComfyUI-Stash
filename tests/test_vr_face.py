@@ -2,7 +2,7 @@
 
 Run in an env with numpy + cv2 + torch (the one where vrproj.py was validated):
 
-    python3 test_vr_face.py
+    python3 tests/test_vr_face.py
 
 It does NOT need ComfyUI or insightface: detection is monkeypatched to a fixed
 center. It exercises VRFaceRectify -> (identity passthrough) -> VRFaceUnrectify and
@@ -10,11 +10,17 @@ checks the rectify/un-rectify round-trip reproduces the patched region. This pro
 the tensor<->numpy, RGBA-alpha, SBS split/merge, and compositing glue are correct
 on top of the already-validated geometry.
 """
+import os
+import sys
+
 import numpy as np
 import torch
 
-import vr_face
-from vr_face import VRFaceRectify, VRFaceUnrectify
+# tests/ live below the package root; put it on the path so the modules import.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import vr_face  # noqa: E402
+from vr_face import VRFaceRectify, VRFaceUnrectify  # noqa: E402
 
 
 def _synthetic_sbs(eye_w=512, eye_h=512):
