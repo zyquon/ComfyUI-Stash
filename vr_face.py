@@ -30,7 +30,63 @@ try:
 except ImportError:  # allow standalone import (tests, offline geometry checks)
     import vr_remap as vr
 
+try:
+    from . import vr_remap_torch as vrt  # GPU/torch port of the hot projections
+except ImportError:
+    try:
+        import vr_remap_torch as vrt
+    except ImportError:
+        vrt = None  # torch absent -> fall back to the numpy/cv2 geometry
+
 NODE_CATEGORY = 'Stash/VR'
+
+
+def _torch_device():
+    """ComfyUI's chosen torch device, or None to let vr_remap_torch auto-pick."""
+    try:
+        import comfy.model_management as mm
+        return mm.get_torch_device()
+    except Exception:
+        return None
+
+
+def _log_backend(node_name, device):
+    """Log the geometry backend + actual compute device, so a run makes it certain
+    whether GPU acceleration is live (prints e.g. 'cuda:0 (NVIDIA ...)')."""
+    if vrt is not None:
+        print(f'{node_name}: geometry backend: torch, device: {vrt.describe_device(device)}')
+    else:
+        print(f'{node_name}: geometry backend: numpy/cv2 (torch not importable)')
+
+
+def _rectify_patch(eye, projection, patch_fov, yaw, pitch, patch_size,
+                   fisheye_fov, cx, cy, radius, device):
+    """e2p/fisheye_e2p on the torch backend if available, else numpy/cv2."""
+    if vrt is not None:
+        if projection == 'fisheye':
+            return vrt.fisheye_e2p(eye, patch_fov, yaw, pitch, patch_size, patch_size,
+                                   fisheye_fov, cx, cy, radius, device=device)
+        return vrt.e2p(eye, patch_fov, yaw, pitch, patch_size, patch_size, device=device)
+    if projection == 'fisheye':
+        return vr.fisheye_e2p(eye, patch_fov, yaw, pitch, patch_size, patch_size,
+                              fisheye_fov, cx, cy, radius)
+    return vr.e2p(eye, patch_fov, yaw, pitch, patch_size, patch_size)
+
+
+def _unrectify_window(rgba, e, eye_w, device):
+    """Windowed p2e/fisheye_p2e on the torch backend if available, else numpy/cv2."""
+    if vrt is not None:
+        if e['projection'] == 'fisheye':
+            return vrt.fisheye_p2e_window(rgba, e['patch_fov'], e['yaw'], e['pitch'],
+                                          eye_w, e['eye_h'], e['fisheye_fov'],
+                                          e['cx'], e['cy'], e['radius'], device=device)
+        return vrt.p2e_window(rgba, e['patch_fov'], e['yaw'], e['pitch'],
+                              eye_w, e['eye_h'], device=device)
+    if e['projection'] == 'fisheye':
+        return vr.fisheye_p2e_window(rgba, e['patch_fov'], e['yaw'], e['pitch'],
+                                     eye_w, e['eye_h'], e['fisheye_fov'],
+                                     e['cx'], e['cy'], e['radius'])
+    return vr.p2e_window(rgba, e['patch_fov'], e['yaw'], e['pitch'], eye_w, e['eye_h'])
 
 
 # ---- ComfyUI IMAGE <-> numpy uint8 RGB ----
@@ -117,6 +173,8 @@ class VRFaceRectify:
 
     def run(self, image, input_layout='mono', projection='equirect',
             patch_fov=80, patch_size=768, fisheye_fov=135.0):
+        device = _torch_device()
+        _log_backend('VR Face Rectify', device)
         frames = [_img_to_np(image[b]) for b in range(image.shape[0])]
 
         patches = []
@@ -139,12 +197,8 @@ class VRFaceRectify:
                 for fx, fy in _detect_faces(eye):
                     yaw, pitch = vr.pixel_to_yaw_pitch(
                         fx, fy, eye_w, eye_h, projection, fisheye_fov, cx, cy, radius)
-                    if projection == 'fisheye':
-                        patch = vr.fisheye_e2p(eye, patch_fov, yaw, pitch,
-                                               patch_size, patch_size, fisheye_fov,
-                                               cx, cy, radius)
-                    else:
-                        patch = vr.e2p(eye, patch_fov, yaw, pitch, patch_size, patch_size)
+                    patch = _rectify_patch(eye, projection, patch_fov, yaw, pitch,
+                                           patch_size, fisheye_fov, cx, cy, radius, device)
                     entries.append({
                         'patch_index': len(patches),
                         'frame_idx': frame_idx, 'eye': eye_name,
@@ -194,6 +248,8 @@ class VRFaceUnrectify:
     FUNCTION = 'run'
 
     def run(self, patches, rectify_map):
+        device = _torch_device()
+        _log_backend('VR Face Unrectify', device)
         frames = [f.copy() for f in rectify_map['frames']]
         entries = rectify_map['entries']
 
@@ -222,13 +278,7 @@ class VRFaceUnrectify:
 
             # Windowed un-rectify: reproject only the eye sub-region the patch
             # covers, so cost tracks the face footprint, not the frame resolution.
-            if e['projection'] == 'fisheye':
-                win, x0, y0 = vr.fisheye_p2e_window(
-                    rgba, e['patch_fov'], e['yaw'], e['pitch'], eye_w, e['eye_h'],
-                    e['fisheye_fov'], e['cx'], e['cy'], e['radius'])
-            else:
-                win, x0, y0 = vr.p2e_window(
-                    rgba, e['patch_fov'], e['yaw'], e['pitch'], eye_w, e['eye_h'])
+            win, x0, y0 = _unrectify_window(rgba, e, eye_w, device)
 
             if win is None:  # patch projects nowhere in the eye -> nothing to do
                 continue
