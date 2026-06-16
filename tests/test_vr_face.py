@@ -86,6 +86,22 @@ def main():
     (tout,) = unrect.run(tp, tmap)
     assert tout.shape == tb.shape, f'{tout.shape} != {tb.shape}'
 
+    # --- regression: an RGBA patch batch must not crash cv2.remap ---
+    # A swapper (or source frame) can hand us 4-channel patches; appending our own
+    # alpha then used to make 5 channels and trip cv2.remap's channels()<=4 assert.
+    # Force the numpy/cv2 backend (vrt=None) since that is the path that asserted;
+    # the torch backend tolerates the extra channel and would hide the regression.
+    rgba_patches = torch.cat([mp, torch.ones_like(mp[..., :1])], dim=-1)
+    assert rgba_patches.shape[-1] == 4, 'test setup: patches should be RGBA here'
+    saved_vrt = vr_face.vrt
+    vr_face.vrt = None
+    try:
+        (rout,) = unrect.run(rgba_patches, mmap)
+    finally:
+        vr_face.vrt = saved_vrt
+    assert rout.shape == mono.shape, f'{rout.shape} != {mono.shape}'
+    print('rgba patch round-trip (cv2 backend): no channel crash')
+
     print('PASS')
 
 

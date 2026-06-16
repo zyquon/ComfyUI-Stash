@@ -91,8 +91,13 @@ def _unrectify_window(rgba, e, eye_w, device):
 
 # ---- ComfyUI IMAGE <-> numpy uint8 RGB ----
 def _img_to_np(t):
-    """One ComfyUI image (H,W,3) float 0..1 -> uint8 numpy RGB."""
-    return (t.detach().cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+    """One ComfyUI image (H,W,C) float 0..1 -> uint8 numpy RGB (H,W,3).
+
+    Drops any alpha/extra channels: ComfyUI IMAGE is usually RGB but can arrive
+    RGBA, and the downstream cv2.remap rejects >4 channels once we append our own
+    alpha for compositing.
+    """
+    return (t.detach().cpu().numpy()[..., :3] * 255.0).clip(0, 255).astype(np.uint8)
 
 
 def _np_to_img(a):
