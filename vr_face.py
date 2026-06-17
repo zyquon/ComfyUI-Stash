@@ -110,10 +110,14 @@ _FACE_APP = None
 
 
 def _detect_faces(eye_rgb):
-    """Return list of (cx, cy) bbox centers for faces in one RGB uint8 eye image.
+    """Return a list of face records for faces in one RGB uint8 eye image.
 
-    Uses insightface (ReActor's own detector, already present in the env). The
-    geometry only needs a rough center; ReActor re-detects precisely on the patch.
+    Each record is a dict: ``{'cx', 'cy', 'bbox', 'gender'}`` -- the bbox center
+    (the rectify geometry only needs a rough center; ReActor re-detects precisely
+    on the patch), the bbox ``(x1, y1, x2, y2)`` for ordering, and the gender
+    (0=female, 1=male, -1=unknown), matching insightface/ReActor conventions.
+
+    Uses insightface (ReActor's own detector, already present in the env).
     Isolated here so an alternate detector (e.g. SAM3-video) can swap in cleanly.
     """
     global _FACE_APP
@@ -125,18 +129,98 @@ def _detect_faces(eye_rgb):
         app.prepare(ctx_id=0, det_size=(640, 640))
         _FACE_APP = app
     bgr = cv2.cvtColor(eye_rgb, cv2.COLOR_RGB2BGR)
-    centers = []
+    faces = []
     for face in _FACE_APP.get(bgr):
-        x1, y1, x2, y2 = face.bbox
-        centers.append(((float(x1) + float(x2)) / 2.0, (float(y1) + float(y2)) / 2.0))
-    return centers
+        x1, y1, x2, y2 = (float(v) for v in face.bbox)
+        faces.append({
+            'cx': (x1 + x2) / 2.0, 'cy': (y1 + y2) / 2.0,
+            'bbox': (x1, y1, x2, y2),
+            'gender': int(getattr(face, 'gender', -1)),
+        })
+    return faces
+
+
+# ---- face selection (frame-level, mirrors ReActor's own options) ----
+def _bbox_area(bbox):
+    x1, y1, x2, y2 = bbox
+    return (x2 - x1) * (y2 - y1)
+
+
+# Ordering keys match ReActor's sort_by_order: left/top use the bbox edge, size
+# uses bbox area. (sort_key, reverse) per mode.
+_FACE_ORDER_KEYS = {
+    'left-right':  (lambda f: f['bbox'][0], False),
+    'right-left':  (lambda f: f['bbox'][0], True),
+    'top-bottom':  (lambda f: f['bbox'][1], False),
+    'bottom-top':  (lambda f: f['bbox'][1], True),
+    'small-large': (lambda f: _bbox_area(f['bbox']), False),
+    'large-small': (lambda f: _bbox_area(f['bbox']), True),
+}
+
+
+def _parse_faces_index(faces_index):
+    """ReActor-compatible index string -> list of ints (empty/invalid -> [0]).
+
+    Also accepts the literal 'all' (case-insensitive) -> the string 'all', a small
+    superset of ReActor for the 'swap everyone in frame' case.
+    """
+    if isinstance(faces_index, str) and faces_index.strip().lower() == 'all':
+        return 'all'
+    idx = [int(x) for x in str(faces_index).strip(',').split(',') if x.strip().isdigit()]
+    return idx or [0]
+
+
+def _select_faces(faces, input_faces_order, input_faces_index, detect_gender_input):
+    """Pick which detected faces to rectify, at the frame/eye level.
+
+    Mirrors ReActor's selection (sort_by_order + faces_index + gender) so rectify
+    isolates the target character BEFORE slicing, instead of emitting one patch per
+    face and letting ReActor re-select inside each single-face patch (where its
+    ranking options are meaningless). Default '0'/'large-small' -> the dominant
+    face only, the common one-character-per-frame case.
+    """
+    if not faces:
+        return []
+    key, reverse = _FACE_ORDER_KEYS.get(input_faces_order, _FACE_ORDER_KEYS['large-small'])
+    ordered = sorted(faces, key=key, reverse=reverse)
+
+    index = _parse_faces_index(input_faces_index)
+    selected = ordered if index == 'all' else [ordered[i] for i in index if 0 <= i < len(ordered)]
+
+    # Gender filter: 'no' keeps all; else keep faces matching (0=female, 1=male).
+    if detect_gender_input in ('female', 'male'):
+        want = 0 if detect_gender_input == 'female' else 1
+        selected = [f for f in selected if f['gender'] == want]
+    return selected
+
+
+def _resolve_selection(options, input_faces_order, input_faces_index, detect_gender_input):
+    """A wired OPTIONS dict (e.g. from ReActor) wins; else the node's widgets.
+
+    Mirrors ReActorPlusOpt's precedence -- a connected OPTIONS overrides the inline
+    widgets -- but reads only the target-side keys that are meaningful frame-level.
+    """
+    if options:
+        return (
+            options.get('input_faces_order', input_faces_order),
+            options.get('input_faces_index', input_faces_index),
+            options.get('detect_gender_input', detect_gender_input),
+        )
+    return input_faces_order, input_faces_index, detect_gender_input
 
 
 class VRFaceRectify:
     """
     Undistort VR faces for swapping. For each VR180-SBS frame, detects faces in
-    each eye and rectifies every face to a flat patch a face swapper can handle.
+    each eye, selects the target face(s) (ReActor-style order/index/gender), and
+    rectifies each selected face to a flat patch a face swapper can handle.
     Outputs the patch batch (feed to ReActor) and a VR_RECTIFY_MAP for un-rectify.
+
+    Selection happens HERE, at the frame level, where ranking ("largest",
+    "rightmost") is meaningful -- ReActor only ever sees one-face patches, so its
+    own order/index options can't isolate a character once we've sliced. Defaults
+    ('0' / 'large-small') emit just the dominant face per eye: the usual
+    one-character-per-job case. A wired OPTIONS input overrides the widgets.
     """
     DESCRIPTION = __doc__
     CATEGORY = NODE_CATEGORY
@@ -171,15 +255,41 @@ class VRFaceRectify:
                     'default': 135.0, 'min': 90.0, 'max': 220.0, 'step': 1.0,
                     'tooltip': 'Full fisheye FOV (deg); only used for fisheye projection',
                 }),
+                'input_faces_order': (
+                    ['left-right', 'right-left', 'top-bottom', 'bottom-top',
+                     'small-large', 'large-small'],
+                    {'default': 'large-small',
+                     'tooltip': 'How to rank faces in each eye before picking by index '
+                                '(matches ReActor). Ignored if an OPTIONS input is wired.'},
+                ),
+                'input_faces_index': ('STRING', {
+                    'default': '0',
+                    'tooltip': 'Which ranked face(s) to swap: "0" (default = dominant face), '
+                               '"0,1", or "all". Selection is frame-level -> one patch per '
+                               'selected face. Ignored if an OPTIONS input is wired.',
+                }),
+                'detect_gender_input': (['no', 'female', 'male'], {
+                    'default': 'no',
+                    'tooltip': 'Only rectify faces of this gender (insightface). '
+                               '"no" = any. Ignored if an OPTIONS input is wired.',
+                }),
+                'options': ('OPTIONS', {
+                    'tooltip': 'Optional ReActor-compatible OPTIONS dict; when wired it '
+                               'overrides the three selection widgets above.',
+                }),
             },
         }
 
     FUNCTION = 'run'
 
     def run(self, image, input_layout='mono', projection='equirect',
-            patch_fov=80, patch_size=768, fisheye_fov=135.0):
+            patch_fov=80, patch_size=768, fisheye_fov=135.0,
+            input_faces_order='large-small', input_faces_index='0',
+            detect_gender_input='no', options=None):
         device = _torch_device()
         _log_backend('VR Face Rectify', device)
+        order, index, gender = _resolve_selection(
+            options, input_faces_order, input_faces_index, detect_gender_input)
         frames = [_img_to_np(image[b]) for b in range(image.shape[0])]
 
         patches = []
@@ -199,7 +309,9 @@ class VRFaceRectify:
                 if projection == 'fisheye':
                     cx, cy, radius = vr.detect_fisheye_circle(eye)
 
-                for fx, fy in _detect_faces(eye):
+                selected = _select_faces(_detect_faces(eye), order, index, gender)
+                for face in selected:
+                    fx, fy = face['cx'], face['cy']
                     yaw, pitch = vr.pixel_to_yaw_pitch(
                         fx, fy, eye_w, eye_h, projection, fisheye_fov, cx, cy, radius)
                     patch = _rectify_patch(eye, projection, patch_fov, yaw, pitch,

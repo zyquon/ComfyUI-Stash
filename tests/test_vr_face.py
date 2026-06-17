@@ -37,11 +37,18 @@ def _synthetic_sbs(eye_w=512, eye_h=512):
     return torch.from_numpy(frame.astype(np.float32) / 255.0)[None,], (cx, cy)
 
 
+def _face_at(cx, cy, half=40, gender=-1):
+    """A _detect_faces record (dict) centered at (cx, cy), for monkeypatching."""
+    return {'cx': cx, 'cy': cy,
+            'bbox': (cx - half, cy - half, cx + half, cy + half),
+            'gender': gender}
+
+
 def main():
     image, (cx, cy) = _synthetic_sbs()
 
     # Force detection to the known face center in each eye.
-    vr_face._detect_faces = lambda eye_rgb: [(cx, cy)]
+    vr_face._detect_faces = lambda eye_rgb: [_face_at(cx, cy)]
 
     rect = VRFaceRectify()
     unrect = VRFaceUnrectify()
@@ -63,7 +70,7 @@ def main():
     # --- mono layout (default): whole frame is one eye, one patch ---
     mono, (mcx, mcy) = _synthetic_sbs(eye_w=512, eye_h=512)
     mono = mono[:, :, :512, :].contiguous()  # take one eye -> a mono frame
-    vr_face._detect_faces = lambda eye_rgb: [(mcx, mcy)]
+    vr_face._detect_faces = lambda eye_rgb: [_face_at(mcx, mcy)]
     mp, mmap, mcount = rect.run(mono, input_layout='mono', projection='equirect',
                                 patch_fov=80, patch_size=256)
     print(f'mono rectify -> count={mcount}, patches.shape={tuple(mp.shape)}')
@@ -77,7 +84,7 @@ def main():
     assert merr < 6.0, f'mono round-trip error too high: {merr}'
 
     # --- tb layout: top/bottom halves, one patch per half ---
-    vr_face._detect_faces = lambda eye_rgb: [(cx, cy)]
+    vr_face._detect_faces = lambda eye_rgb: [_face_at(cx, cy)]
     tb = torch.cat([image[:, :, :512, :], image[:, :, :512, :]], dim=1).contiguous()  # stack one eye over itself
     tp, tmap, tcount = rect.run(tb, input_layout='tb', projection='equirect',
                                 patch_fov=80, patch_size=256)
@@ -102,7 +109,58 @@ def main():
     assert rout.shape == mono.shape, f'{rout.shape} != {mono.shape}'
     print('rgba patch round-trip (cv2 backend): no channel crash')
 
+    _test_selection()
+
     print('PASS')
+
+
+def _test_selection():
+    """Frame-level face selection: order/index/gender pick which faces get patches."""
+    # Three faces in one mono eye: small-left-female, big-mid-male, mid-right-female.
+    small = _face_at(60, 250, half=20, gender=0)    # area 1600
+    big = _face_at(256, 250, half=80, gender=1)     # area 25600 (largest)
+    right = _face_at(450, 250, half=40, gender=0)   # area 6400 (rightmost)
+    faces = [small, big, right]
+
+    sel = vr_face._select_faces  # (faces, order, index, gender)
+
+    # Default: dominant face only (largest), index 0 -> the big one.
+    got = sel(faces, 'large-small', '0', 'no')
+    assert got == [big], 'default large-small/0 should pick the single largest face'
+
+    # 'all' emits every detected face (the old fan-out, now opt-in).
+    assert len(sel(faces, 'large-small', 'all', 'no')) == 3, "'all' should keep every face"
+
+    # Ranking is frame-level: rightmost via order, 2nd-largest via index.
+    assert sel(faces, 'right-left', '0', 'no') == [right], 'right-left/0 = rightmost face'
+    assert sel(faces, 'large-small', '1', 'no') == [right], 'large-small/1 = 2nd largest'
+
+    # Gender filter (insightface: 0=female, 1=male) drops non-matching faces.
+    # large-small order -> females in ranked order: right (6400) before small (1600).
+    assert sel(faces, 'large-small', 'all', 'female') == [right, small], 'female keeps only females'
+    assert sel(faces, 'large-small', '0', 'female') == [], 'largest is male -> female filter empties'
+
+    # Out-of-range index is dropped, not an error; empty/garbage index -> [0].
+    assert sel(faces, 'large-small', '9', 'no') == [], 'out-of-range index selects nothing'
+    assert sel(faces, 'large-small', '', 'no') == [big], 'empty index defaults to 0'
+
+    # A wired OPTIONS dict overrides the widget args.
+    opts = {'input_faces_order': 'right-left', 'input_faces_index': '0', 'detect_gender_input': 'no'}
+    resolved = vr_face._resolve_selection(opts, 'large-small', '0', 'no')
+    assert resolved == ('right-left', '0', 'no'), 'OPTIONS should override widgets'
+    assert vr_face._resolve_selection(None, 'top-bottom', '2', 'male') == ('top-bottom', '2', 'male'), \
+        'no OPTIONS -> widgets pass through'
+
+    # End-to-end through rect.run: 3 faces but default selection -> 1 patch.
+    mono, _ = _synthetic_sbs(eye_w=512, eye_h=512)
+    mono = mono[:, :, :512, :].contiguous()
+    vr_face._detect_faces = lambda eye_rgb: [small, big, right]
+    rect = VRFaceRectify()
+    _, _, c_default = rect.run(mono, input_layout='mono', patch_size=128)
+    assert c_default == 1, f'default selection should emit 1 patch, got {c_default}'
+    _, _, c_all = rect.run(mono, input_layout='mono', patch_size=128, input_faces_index='all')
+    assert c_all == 3, f"'all' should emit 3 patches, got {c_all}"
+    print('selection: order/index/gender/all + OPTIONS override all correct')
 
 
 if __name__ == '__main__':
