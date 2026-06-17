@@ -65,7 +65,7 @@ This reads from `queries.graphql` and generates Python client code based on the 
    - `StashNode` - Establishes connection to Stash server, returns STASH connection object
    - `StashImage` - Queries for images using ID, search string, or tags
 3. **VR Face Nodes** (`vr_face.py`) - Two nodes for distortion-free face-swapping on VR/180° footage:
-   - `VRFaceRectify` - Detects faces in VR/fisheye frames, outputs flat face patches + a `VR_RECTIFY_MAP` (feed patches to ReActor). Lazily imports `cv2`/`insightface` only when run.
+   - `VRFaceRectify` - Detects faces in VR/fisheye frames, selects the target face(s) (ReActor-style `input_faces_order`/`input_faces_index`/`detect_gender_input` widgets, or a wired `OPTIONS` dict which overrides them), and outputs flat face patches + a `VR_RECTIFY_MAP` (feed patches to ReActor). Selection is frame-level (one patch per selected face) because ReActor only ever sees single-face patches; default `0`/`large-small` emits just the dominant face per eye. Index `all` restores the old swap-every-face fan-out. Lazily imports `cv2`/`insightface` only when run.
    - `VRFaceUnrectify` - Projects swapped patches back into the original VR frames using the `VR_RECTIFY_MAP`
 4. **Projection Geometry** (`vr_remap.py`) - Pure equirect/fisheye remap math (numpy + cv2). Has **zero ComfyUI imports on purpose** so it is unit-testable offline.
 5. **Settings Management** (`settings.py`) - Reads ComfyUI user settings to get Stash API URL and key
