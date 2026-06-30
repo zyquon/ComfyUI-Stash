@@ -38,6 +38,9 @@ class StashNode:
     FUNCTION = 'run'
     def run(self):
         settings = Settings().get_settings()
+        if not settings:
+            raise ValueError(f'Could not read Comfy settings. Set the Stash API URL and Key in Comfy settings, then retry')
+
         api_url = settings.get('api_url')
         if not api_url:
             raise ValueError(f'You must set the Stash API URL in Comfy settings')

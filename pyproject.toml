@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ComfyUI-Stash"
-version = "1.0.0"
+version = "1.0.1"
 description = "Stash nodes for ComfyUI: Load content from Stash for use in Comfy workflows."
 authors = [
   {name = "Zyqu Onrel", email = "zyquonrel@gmail.com"}

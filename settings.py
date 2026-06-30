@@ -28,13 +28,22 @@ class Settings:
 
         user_manager = PromptServer.instance.user_manager
         users_dir = os.path.dirname(user_manager.get_users_file())
-        user_dirs = [ d for d in os.listdir(users_dir) if os.path.isdir(os.path.join(users_dir, d)) ]
-        if not user_dirs:
-            print(f"Create user directory: {user_dirs[0]!r}")
-            os.mkdir(user_dirs[0])
-            user_dirs[0] = os.path.join(COMFYUI_DIR, "user")
+        # Ignore internal dirs like ComfyUI-Manager's `__manager`; prefer the
+        # standard `default` user, since picking listdir()[0] is order-dependent.
+        user_dirs = [
+            d for d in os.listdir(users_dir)
+            if os.path.isdir(os.path.join(users_dir, d)) and not d.startswith('_')
+        ]
+        if 'default' in user_dirs:
+            user = 'default'
+        elif user_dirs:
+            user = user_dirs[0]
+        else:
+            print(f"Create user directory: {'default'!r}")
+            user = 'default'
+            os.mkdir(os.path.join(users_dir, user))
 
-        self.settings_filepath = os.path.join(users_dir, user_dirs[0], "comfy.settings.json")
+        self.settings_filepath = os.path.join(users_dir, user, "comfy.settings.json")
         return self.settings_filepath
 
     def get_settings(self):
